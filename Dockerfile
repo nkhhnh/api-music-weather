@@ -24,6 +24,10 @@ RUN composer install --no-dev --prefer-dist --no-scripts --no-progress --optimiz
 
 RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache /var/www/html/resources/views
 
+# Debug: Kiểm tra file welcome.blade.php
+RUN ls -la /var/www/html/resources/views || { echo "Views directory not found"; exit 1; }
+RUN test -f /var/www/html/resources/views/welcome.blade.php || { echo "welcome.blade.php not found"; exit 1; }
+
 RUN php artisan route:clear
 RUN php artisan config:clear
 RUN php artisan optimize
