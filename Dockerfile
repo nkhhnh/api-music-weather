@@ -39,7 +39,7 @@ RUN mkdir -p /etc/nginx/conf.d
 COPY docker/nginx/default.conf /etc/nginx/conf.d/default.conf
 
 # Xóa cấu hình Nginx mặc định (để tránh xung đột)
-RUN rm /etc/nginx/conf.d/default
+RUN if [ -f /etc/nginx/conf.d/default ]; then rm /etc/nginx/conf.d/default; fi
 
 # Chạy các lệnh Artisan quan trọng
 RUN php artisan route:clear
