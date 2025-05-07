@@ -18,7 +18,13 @@ use App\Http\Controllers\AlbumSongController;
 | be assigned to the "api" middleware group. Make something great!
 |
 */
-
+Route::get('/api/test', function () {
+    return response()->json([
+        'message' => 'API is working!',
+        'status' => 'success',
+        'timestamp' => now()
+    ], 200);
+});
 
 
 
