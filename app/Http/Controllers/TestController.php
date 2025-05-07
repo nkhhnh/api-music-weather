@@ -10,6 +10,6 @@ class TestController extends Controller
 {
     public function showForm()
     {
-        return view('Welcome');
+        return view('welcome');
     }
 }
