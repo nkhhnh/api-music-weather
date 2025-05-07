@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     unzip \
     git \
     curl \
+    nginx \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install -j$(nproc) gd pdo pdo_mysql mbstring xml zip bcmath
 
@@ -25,8 +26,12 @@ RUN composer install --no-dev --prefer-dist --no-scripts --no-progress --optimiz
 RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache /var/www/html/resources/views
 RUN chmod -R 755 /var/www/html
 
-RUN php artisan route:clear
-RUN php artisan config:clear
-RUN php artisan optimize
+# Tạo thư mục cho cấu hình Nginx
+RUN mkdir -p /etc/nginx/conf.d
 
-CMD ["php-fpm"]
+# Copy cấu hình Nginx (chúng ta sẽ tạo file này ở bước sau)
+COPY docker/nginx/default.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80
+
+CMD ["/bin/sh", "-c", "service nginx start && php-fpm"]
