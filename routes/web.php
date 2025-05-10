@@ -18,3 +18,8 @@ use App\Http\Controllers\TestController;
 
 
 Route::get('/welcome', [TestController::class, 'showForm']);
+
+
+Route::get('/home', function () {
+    return view('welcome');
+});
