@@ -17,4 +17,4 @@ use App\Http\Controllers\TestController;
 
 
 
-Route::get('/welcome', [TestController::class, 'showForm'])->name('test.google.drive.form');
+Route::get('/welcome', [TestController::class, 'showForm']);
