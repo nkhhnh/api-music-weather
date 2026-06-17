@@ -55,6 +55,11 @@ class AuthController extends Controller
             ], 401);
         }
 
+        // Dọn dẹp các token đã hết hạn của chính user này
+        $expirationMinutes = config('sanctum.expiration', 21600);
+        $expirationThreshold = now()->subMinutes($expirationMinutes);
+        $user->tokens()->where('created_at', '<', $expirationThreshold)->delete();
+
         $token = $user->createToken('MusicAppToken')->plainTextToken;
 
         return response()->json(['message' => 'Đăng nhập thành công', 'token' => $token], 200);
