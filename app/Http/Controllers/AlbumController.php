@@ -4,15 +4,70 @@ namespace App\Http\Controllers;
 
 use App\Models\Album;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 class AlbumController extends Controller
 {
+    /**
+     * Danh sach album KEM bai hat.
+     *
+     * Truoc day chi tra ve ban ghi album tran, khong co 'songs'. Hau qua:
+     * danh sach album luon hien "Khong co bai hat trong album nay", va moi
+     * lan bam vao mot album lai phai goi /albums/{id} - mot vong mang nua,
+     * chinh la doan cho lau khi mo album.
+     *
+     * Bai hat cua TAT CA album duoc lay trong MOT truy van duy nhat, khong
+     * lap query theo tung album.
+     */
     public function index()
     {
-        $userId = auth()->user()->id; 
+        $userId = auth()->user()->id;
         $albums = Album::where('user_id', $userId)->get();
-        return response()->json($albums);
+
+        if ($albums->isEmpty()) {
+            return response()->json([], 200);
+        }
+
+        $songsByAlbum = DB::table('album_song')
+            ->join('songs', 'songs.id', '=', 'album_song.song_id')
+            ->leftJoin('user_song', function ($join) use ($userId) {
+                $join->on('songs.id', '=', 'user_song.song_id')
+                     ->where('user_song.user_id', '=', $userId);
+            })
+            ->whereIn('album_song.album_id', $albums->pluck('id'))
+            ->select(
+                'album_song.album_id',
+                'songs.id as song_id',
+                'songs.file_path',
+                'user_song.custom_name as override_name',
+                'user_song.custom_artist as override_artist'
+            )
+            ->orderBy('album_song.id')
+            ->get()
+            ->groupBy('album_id');
+
+        $payload = $albums->map(function ($album) use ($songsByAlbum) {
+            $songs = collect($songsByAlbum->get($album->id, []))
+                ->map(function ($row) {
+                    return [
+                        'song_id'       => $row->song_id,
+                        'custom_name'   => $row->override_name ?? 'Unknown',
+                        'custom_artist' => $row->override_artist ?? 'Unknown',
+                        'file_path'     => $row->file_path,
+                    ];
+                })
+                ->values();
+
+            return [
+                'id'         => $album->id,
+                'album_name' => $album->album_name,
+                'songs'      => $songs,
+                'song_count' => $songs->count(),
+            ];
+        });
+
+        return response()->json($payload, 200);
     }
 
     public function show($id)

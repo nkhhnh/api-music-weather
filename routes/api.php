@@ -54,6 +54,8 @@ Route::middleware('auth:sanctum','throttle:60,1')->group(function () {
     // Song routes
     Route::get('/songs', [SongController::class, 'index']);
     Route::post('/songs', [SongController::class, 'store']);
+    // Hoi truoc bang ma hash: file da co san thi khong phai tai len byte nao
+    Route::post('/songs/check-hash', [SongController::class, 'checkHash']);
     Route::delete('/songs/{id}', [SongController::class, 'destroy']);
 
     // Album routes

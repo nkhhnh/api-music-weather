@@ -6,6 +6,7 @@ use App\Models\Song;
 use App\Models\UserSong;
 use App\Models\AlbumSong;
 use Google\Service\Drive;
+use Google\Http\MediaFileUpload;
 use Illuminate\Http\Request;
 use Google\Service\Drive\DriveFile;
 use Illuminate\Support\Facades\Log;
@@ -66,8 +67,16 @@ class SongController extends Controller
         $newSongId = null; // Song ID nếu đã tạo mới trong DB (không phải bài có sẵn)
 
         try {
-            $fileContent = file_get_contents($file->getRealPath());
-            $fileHash    = hash('sha256', $fileContent);
+            // hash_file() doc theo luong tu dia. Truoc day file_get_contents()
+            // nap nguyen file vao RAM roi hash tren bien do, va chinh bien do
+            // lai duoc truyen cho Drive -> file nam trong bo nho it nhat hai
+            // ban, trong khi memory_limit chi co 256M.
+            $filePathOnDisk = $file->getRealPath();
+            $fileHash       = hash_file('sha256', $filePathOnDisk);
+
+            if ($fileHash === false) {
+                throw new \Exception('Khong the tinh ma hash cua file');
+            }
 
             // Kiểm tra file đã tồn tại trên Drive hay chưa (theo hash)
             $existingSong = Song::where('file_hash', $fileHash)->first();
@@ -81,20 +90,11 @@ class SongController extends Controller
                 $originalName = $file->getClientOriginalName();
                 $fileName     = time() . '_' . str_replace(' ', '_', $originalName);
 
-                $driveFile = new DriveFile();
-                $driveFile->setName($fileName);
-                $driveFile->setParents([config('services.google_drive.folder_id')]);
-
-                $uploadedFile = $this->drive->files->create($driveFile, [
-                    'data'       => $fileContent,
-                    'mimeType'   => $file->getClientMimeType(),
-                    'uploadType' => 'multipart',
-                ]);
-
-                $fileId = $uploadedFile->id;
-                if (!$fileId) {
-                    throw new \Exception('Không thể trích xuất file ID sau khi upload lên Drive');
-                }
+                $fileId = $this->uploadToDrive(
+                    $filePathOnDisk,
+                    $fileName,
+                    $file->getClientMimeType() ?: 'audio/mpeg'
+                );
 
                 // ── BƯỚC 2: Cấp quyền public ─────────────────────────────────
                 $permission = new Permission([
@@ -114,22 +114,12 @@ class SongController extends Controller
             }
 
             // ── BƯỚC 4: Liên kết bài hát với user ────────────────────────────
-            $userSong = UserSong::where('user_id', $userId)
-                ->where('song_id', $song->id)
-                ->first();
-
-            if ($userSong) {
-                $userSong->update([
-                    'custom_name'   => $request->custom_name,
-                    'custom_artist' => $request->custom_artist,
-                ]);
-            } else {
-                $userSong = $song->userSongs()->create([
-                    'user_id'       => $userId,
-                    'custom_name'   => $request->custom_name,
-                    'custom_artist' => $request->custom_artist,
-                ]);
-            }
+            $userSong = $this->linkSongToUser(
+                $song,
+                $userId,
+                $request->custom_name,
+                $request->custom_artist
+            );
 
             return response()->json([
                 'message' => 'Upload bài hát thành công',
@@ -345,10 +335,16 @@ class SongController extends Controller
             }
 
             // Tạo phản hồi stream bằng response()->stream()
+            // Cache-Control cho phép trình duyệt lưu lại file nhạc, nhờ đó khi
+            // thiết bị tắt màn hình rồi kết nối lại thì phần đã tải không phải
+            // lấy lại từ đầu qua mạng.
             $headers = [
                 'Content-Type' => 'audio/mpeg',
                 'Content-Length' => $length,
                 'Accept-Ranges' => 'bytes',
+                'Content-Disposition' => 'inline',
+                'Cache-Control' => 'public, max-age=604800',
+                'X-Content-Type-Options' => 'nosniff',
             ];
 
             if ($statusCode === 206) {
@@ -357,10 +353,19 @@ class SongController extends Controller
 
             return response()->stream(
                 function () use ($stream) {
+                    // Client ngắt kết nối (tua bài, đổi bài, mất sóng) thì dừng
+                    // ngay thay vì tiếp tục kéo dữ liệu từ Google Drive và giữ
+                    // worker của server.
+                    ignore_user_abort(false);
+
                     // Đọc dữ liệu từ stream và gửi đến client
                     while (!feof($stream)) {
                         echo fread($stream, 16384);
                         flush();
+
+                        if (connection_aborted()) {
+                            break;
+                        }
                     }
                     // Đóng stream sau khi hoàn tất
                     if (is_resource($stream)) {
@@ -383,6 +388,134 @@ class SongController extends Controller
             ]);
             return response()->json(['message' => 'Lỗi khi stream file: ' . $e->getMessage()], 500);
         }
+    }
+
+    /**
+     * Gan bai hat vao thu vien cua user (tao moi hoac cap nhat ten tuy chinh).
+     */
+    private function linkSongToUser(Song $song, $userId, string $customName, string $customArtist): UserSong
+    {
+        $userSong = UserSong::where('user_id', $userId)
+            ->where('song_id', $song->id)
+            ->first();
+
+        if ($userSong) {
+            $userSong->update([
+                'custom_name'   => $customName,
+                'custom_artist' => $customArtist,
+            ]);
+
+            return $userSong;
+        }
+
+        return $song->userSongs()->create([
+            'user_id'       => $userId,
+            'custom_name'   => $customName,
+            'custom_artist' => $customArtist,
+        ]);
+    }
+
+    /**
+     * Day file len Google Drive theo tung khoi, doc thang tu dia.
+     *
+     * Truoc day dung uploadType 'multipart' voi toan bo noi dung file nam san
+     * trong mot bien PHP: ton RAM bang dung kich thuoc file, va dut giua chung
+     * thi phai lam lai tu dau. Resumable upload chi giu mot khoi 1.5MB trong
+     * bo nho tai moi thoi diem.
+     */
+    private function uploadToDrive(string $path, string $fileName, string $mimeType): string
+    {
+        $client = $this->drive->getClient();
+
+        $driveFile = new DriveFile();
+        $driveFile->setName($fileName);
+        $driveFile->setParents([config('services.google_drive.folder_id')]);
+
+        $handle = null;
+
+        // setDefer(true) khien create() tra ve request thay vi gui luon, de
+        // MediaFileUpload tu dieu phoi viec gui tung khoi.
+        $client->setDefer(true);
+
+        try {
+            $createRequest = $this->drive->files->create($driveFile, ['fields' => 'id']);
+
+            $media = new MediaFileUpload(
+                $client,
+                $createRequest,
+                $mimeType,
+                null,
+                true,
+                self::CHUNK_SIZE
+            );
+            $media->setFileSize(filesize($path));
+
+            $handle = fopen($path, 'rb');
+            if ($handle === false) {
+                throw new \Exception('Khong the mo file de tai len Drive');
+            }
+
+            $result = false;
+            while ($result === false && !feof($handle)) {
+                $chunk = fread($handle, self::CHUNK_SIZE);
+                if ($chunk === false) {
+                    throw new \Exception('Loi khi doc file de tai len Drive');
+                }
+                $result = $media->nextChunk($chunk);
+            }
+
+            if (!$result || empty($result->id)) {
+                throw new \Exception('Khong nhan duoc file ID sau khi tai len Drive');
+            }
+
+            return $result->id;
+        } finally {
+            if (is_resource($handle)) {
+                fclose($handle);
+            }
+            // setDefer la trang thai cua client dung chung, phai tra lai.
+            $client->setDefer(false);
+        }
+    }
+
+    /**
+     * Kiem tra file da co tren he thong chua, dua tren ma hash client tu tinh.
+     *
+     * Co san thi gan luon vao thu vien cua user va khong phai tai len byte nao.
+     * store() cung chong trung bang hash, nhung chi phat hien duoc SAU KHI da
+     * nhan xong toan bo file.
+     */
+    public function checkHash(Request $request)
+    {
+        $request->validate([
+            'file_hash'     => 'required|string|regex:/^[A-Fa-f0-9]{64}$/',
+            'custom_name'   => 'required|string|max:255',
+            'custom_artist' => 'required|string|max:255',
+        ]);
+
+        $song = Song::where('file_hash', strtolower($request->file_hash))->first();
+
+        if (!$song) {
+            return response()->json(['exists' => false], 200);
+        }
+
+        $userSong = $this->linkSongToUser(
+            $song,
+            auth()->user()->id,
+            $request->custom_name,
+            $request->custom_artist
+        );
+
+        return response()->json([
+            'exists'  => true,
+            'message' => 'Bai hat da co san tren he thong, da them vao thu vien cua ban',
+            'song'    => [
+                'song_id'       => $song->id,
+                'custom_name'   => $userSong->custom_name,
+                'custom_artist' => $userSong->custom_artist,
+                'file_path'     => $song->file_path,
+            ],
+        ], 201);
     }
 
     public function download(Request $request, $id)
