@@ -10,6 +10,7 @@ use Google\Http\MediaFileUpload;
 use Illuminate\Http\Request;
 use Google\Service\Drive\DriveFile;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Cache;
 use Google\Service\Drive\Permission;
 use Illuminate\Support\Facades\Storage;
 class SongController extends Controller
@@ -268,15 +269,15 @@ class SongController extends Controller
 
             // Lấy thông tin file từ Google Drive
             try {
-                $file = $this->drive->files->get($fileId, ['fields' => 'size,mimeType']);
+                $meta = $this->getDriveFileMeta($fileId);
             } catch (\Google\Service\Exception $e) {
                 throw new \Exception('Lỗi khi lấy thông tin file từ Google Drive: ' . $e->getMessage());
             }
 
-            $fileSize = $file->size;
+            $fileSize = $meta['size'];
 
             // Kiểm tra mimeType từ Google Drive
-            $mimeType = $file->mimeType;
+            $mimeType = $meta['mimeType'];
             if ($mimeType !== 'audio/mpeg') {
                 throw new \Exception('File không phải định dạng MP3: ' . $mimeType);
             }
@@ -360,7 +361,7 @@ class SongController extends Controller
 
                     // Đọc dữ liệu từ stream và gửi đến client
                     while (!feof($stream)) {
-                        echo fread($stream, 16384);
+                        echo fread($stream, 65536);
                         flush();
 
                         if (connection_aborted()) {
@@ -540,15 +541,15 @@ class SongController extends Controller
 
         // Lấy thông tin file từ Google Drive
         try {
-            $file = $this->drive->files->get($fileId, ['fields' => 'size,mimeType']);
+            $meta = $this->getDriveFileMeta($fileId);
         } catch (\Google\Service\Exception $e) {
             throw new \Exception('Lỗi khi lấy thông tin file từ Google Drive: ' . $e->getMessage());
         }
 
-        $fileSize = $file->size;
+        $fileSize = $meta['size'];
 
         // Kiểm tra mimeType từ Google Drive
-        $mimeType = $file->mimeType;
+        $mimeType = $meta['mimeType'];
         if ($mimeType !== 'audio/mpeg') {
             throw new \Exception('File không phải định dạng MP3: ' . $mimeType);
         }
@@ -624,6 +625,25 @@ class SongController extends Controller
         return response()->json(['message' => 'Lỗi khi tải file: ' . $e->getMessage()], 500);
     }
 }
+
+    /**
+     * Mỗi bài hát là một file riêng trên Drive và không bao giờ bị sửa nội dung,
+     * nên size/mimeType cache được lâu. Trình duyệt bắn rất nhiều request Range
+     * cho cùng một bài; nếu mỗi request còn phải hỏi Drive thêm một vòng HTTPS
+     * nữa thì trên server single-thread (php -S) của Render độ trễ cộng dồn đủ
+     * để buffer phía client cạn giữa chừng.
+     */
+    private function getDriveFileMeta($fileId)
+    {
+        return Cache::remember("drive_meta_{$fileId}", now()->addDays(7), function () use ($fileId) {
+            $file = $this->drive->files->get($fileId, ['fields' => 'size,mimeType']);
+
+            return [
+                'size'     => $file->size,
+                'mimeType' => $file->mimeType,
+            ];
+        });
+    }
 
     private function extractFileId($filePath)
     {
