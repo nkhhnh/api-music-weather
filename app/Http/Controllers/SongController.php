@@ -19,6 +19,9 @@ class SongController extends Controller
 
     const CHUNK_SIZE = 1572864;
 
+    // Số byte tối đa trả về cho một request Range mở.
+    const RANGE_WINDOW = 4194304; // 4MB
+
     public function __construct(Drive $drive)
     {
         $this->drive = $drive;
@@ -292,6 +295,14 @@ class SongController extends Controller
             if ($range = $request->header('Range')) {
                 [$start, $end] = sscanf(str_replace('bytes=', '', $range), "%d-%d");
                 $end = $end ?: $fileSize - 1;
+
+                // Trình duyệt hay hỏi "bytes=N-" (từ đây đến hết bài). Đáp nguyên
+                // phần còn lại nghĩa là một request giữ server suốt thời lượng
+                // bài hát — mà php -S chỉ phục vụ được một request tại một thời
+                // điểm. Cắt thành cửa sổ vừa phải: HTTP cho phép trả ít hơn số
+                // byte được hỏi, trình duyệt sẽ tự xin tiếp đoạn sau.
+                $end = min($end, $start + self::RANGE_WINDOW - 1, $fileSize - 1);
+
                 $length = $end - $start + 1;
                 $statusCode = 206;
             }
@@ -307,9 +318,18 @@ class SongController extends Controller
                 ]
             );
 
-            // Gửi yêu cầu và lấy phản hồi từ Google Drive
+            // Gửi yêu cầu và lấy phản hồi từ Google Drive.
+            //
+            // 'stream' => true là bắt buộc. Mặc định Guzzle là false, nghĩa là
+            // send() KHÔNG trả về cho tới khi đã tải xong TOÀN BỘ body vào
+            // php://temp. Tức là mỗi request Range của trình duyệt đều bắt server
+            // tải trọn phần dữ liệu được hỏi từ Google về đĩa Render trước, rồi
+            // mới nhả byte đầu tiên cho client. Màn hình tắt thì Chrome thu nhỏ
+            // buffer và hỏi Range dày hơn, nên cái giá đó phải trả đi trả lại
+            // -> nhạc giật. Với stream => true, byte chảy thẳng từ Drive ra
+            // client ngay khi về tới.
             try {
-                $response = $httpClient->send($request);
+                $response = $httpClient->send($request, ['stream' => true]);
             } catch (\GuzzleHttp\Exception\RequestException $e) {
                 throw new \Exception('Lỗi khi gửi yêu cầu đến Google Drive: ' . $e->getMessage());
             }
@@ -353,16 +373,26 @@ class SongController extends Controller
             }
 
             return response()->stream(
-                function () use ($stream) {
+                function () use ($stream, $length) {
                     // Client ngắt kết nối (tua bài, đổi bài, mất sóng) thì dừng
                     // ngay thay vì tiếp tục kéo dữ liệu từ Google Drive và giữ
                     // worker của server.
                     ignore_user_abort(false);
 
-                    // Đọc dữ liệu từ stream và gửi đến client
-                    while (!feof($stream)) {
-                        echo fread($stream, 65536);
+                    // Ghi đúng $length byte đã hứa trong Content-Length, không
+                    // chạy tới feof. Nếu Drive trả nhiều hơn phần được hỏi thì
+                    // đọc tới feof sẽ đẩy thừa byte so với Content-Length, làm
+                    // hỏng response và gây lỗi giải mã ngay giữa bài.
+                    $remaining = (int) $length;
+                    while ($remaining > 0 && !feof($stream)) {
+                        $chunk = fread($stream, min(65536, $remaining));
+                        if ($chunk === false || $chunk === '') {
+                            break;
+                        }
+
+                        echo $chunk;
                         flush();
+                        $remaining -= strlen($chunk);
 
                         if (connection_aborted()) {
                             break;
@@ -566,7 +596,7 @@ class SongController extends Controller
 
         // Gửi yêu cầu và lấy phản hồi từ Google Drive
         try {
-            $response = $httpClient->send($request);
+            $response = $httpClient->send($request, ['stream' => true]);
         } catch (\GuzzleHttp\Exception\RequestException $e) {
             throw new \Exception('Lỗi khi gửi yêu cầu đến Google Drive: ' . $e->getMessage());
         }
